@@ -5,8 +5,11 @@ from bs4 import BeautifulSoup
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+import requests
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
+OLLAMA_ENDPOINT = "http://localhost:11434/api/generate"
+
 
 def authenticate():
     flow = InstalledAppFlow.from_client_secrets_file('credentials.json', scopes=SCOPES)
@@ -14,8 +17,10 @@ def authenticate():
     service = build('gmail', 'v1', credentials=creds)
     return service
 
+
 def decode_base64_data(data):
     return base64.urlsafe_b64decode(data).decode(errors='ignore')
+
 
 def extract_email_body(payload):
     def get_parts(parts):
@@ -49,6 +54,7 @@ def extract_email_body(payload):
 
     return get_parts(payload["parts"])
 
+
 def download_attachment(service, msg_id, store_dir='resumes'):
     msg = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
 
@@ -80,6 +86,33 @@ def download_attachment(service, msg_id, store_dir='resumes'):
     parts = msg.get("payload", {}).get("parts", [])
     save_parts(parts)
 
+
+def check_email(message):
+    prompt_text = f"""You are an intelligent email classifier. Your job is to read the email content and respond with only one word: 'yes' if it is a job application or resume submission, and 'no' otherwise.
+
+Respond with only one word: 'yes' or 'no'.
+
+Now classify the following email:
+Email: {message}
+
+Is this a job application?"""
+
+    response = requests.post(
+        OLLAMA_ENDPOINT,
+        json={
+            "prompt": prompt_text,
+            "model": "llama3.2",
+            "stream": False
+        }
+    )
+    if response.status_code == 200:
+        result = response.json().get("response", "").strip().lower()
+        return result == "yes"
+    else:
+        print("Error from Ollama:", response.text)
+        return False
+
+
 def get_primary_messages(service, MAX_RESULTS=5):
     results = service.users().messages().list(
         userId='me',
@@ -87,7 +120,7 @@ def get_primary_messages(service, MAX_RESULTS=5):
         maxResults=MAX_RESULTS,
         q='is:unread'
     ).execute()
-    
+
     messages = results.get('messages', [])
     if not messages:
         print("No new unread emails in Primary.")
@@ -103,22 +136,27 @@ def get_primary_messages(service, MAX_RESULTS=5):
                 subject = header['value']
             if header['name'] == 'From':
                 sender = header['value']
-        
+
         print(f"\nNew Email:")
         print(f"From: {sender}")
         print(f"Subject: {subject}\n")
-        print(f"Messages: {messages}\n")
 
         body = extract_email_body(payload)
-        print(f"Body Preview:\n{body[:20000]}\n")
+        print(f"Body Preview:\n{body[:2000]}\n")
 
-        download_attachment(service, msg['id'])
+        if check_email(body):
+            print("This is a job application or resume submission.")
+            download_attachment(service, msg['id'])
+            print("Attachment downloaded.")
+        else:
+            print("This is not a job application or resume submission.")
 
         service.users().messages().modify(
             userId='me',
             id=msg['id'],
             body={'removeLabelIds': ['UNREAD']}
         ).execute()
+
 
 def monitor_loop(service, interval=10):
     print("Starting Gmail listener...")
@@ -129,6 +167,7 @@ def monitor_loop(service, interval=10):
         except Exception as e:
             print(f"Error: {e}")
             time.sleep(60)
+
 
 if __name__ == '__main__':
     service = authenticate()
